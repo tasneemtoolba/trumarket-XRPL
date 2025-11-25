@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { s3Service } from '@/aws/s3.service';
 import { BlockchainService } from '@/blockchain/blockchain.service';
 import { config } from '@/config';
+import { XrplService } from '@/xrpl/xrpl.service';
 import { providers } from '@/constants';
 import SyncDealsLogsJob, {
   DealsLogsJobType,
@@ -39,6 +40,7 @@ export class DealsService {
     private readonly users: UsersService,
     private readonly notifications: NotificationsService,
     private readonly blockchain: BlockchainService,
+    private readonly xrpl: XrplService,
   ) { }
 
   private async uploadFile(
@@ -240,30 +242,77 @@ export class DealsService {
           logger.debug('Automatic deal acceptance enabled! Minting NFT...');
           const buyer = await this.users.findByEmail(deal.buyers[0].email);
 
-          const lastBlock = await this.blockchain.getLastBlock();
+          if (config.useXrpl) {
+            // XRPL flow: Create vault and borrower per deal (like DealVault contract)
+            logger.debug('Using XRPL for deal creation...');
+            
+            // Create new vault wallet for this deal
+            const vaultWallet = this.xrpl.createDealVault();
+            
+            // Create borrower wallet (or use deal's supplier if they have XRPL wallet)
+            const borrowerWallet = this.xrpl.createDealBorrower();
+            
+            // Fund vault and borrower accounts with XRP for activation (if needed)
+            // Note: In production, you'd check if they need funding first
+            // For now, assume they're funded or will be funded separately
+            
+            // Setup trustlines automatically
+            logger.debug('Setting up XRPL trustlines for deal...');
+            const { vaultHash, borrowerHash } = await this.xrpl.setupDealTrustlines(
+              vaultWallet,
+              borrowerWallet,
+            );
+            logger.debug(`Trustlines set: vault=${vaultHash}, borrower=${borrowerHash}`);
+            
+            // Mint deal NFT with metadata
+            const metadata = {
+              dealId: parseInt(dealId) || 0,
+              borrower: borrowerWallet.address,
+              milestones: deal.milestones.map((m) => m.fundsDistribution),
+              maxDeposit: `${deal.investmentAmount} USD`,
+            };
 
-          const txHash = await this.blockchain.mintNFT(
-            deal.milestones.map((m) => m.fundsDistribution),
-            deal.investmentAmount,
-            buyer.walletAddress,
-          );
-          const nftID = await this.blockchain.getNftID(txHash);
-          console.log('nftID', nftID);
-          // wait for 5 seconds to get the vault address
-          await new Promise((resolve) => setTimeout(resolve, 5000));
-          const vault = await this.blockchain.vault(nftID);
+            const txHash = await this.xrpl.mintDealNft(metadata);
 
-          await SyncDealsLogsJob.create({
-            type: DealsLogsJobType.Vault,
-            contract: vault,
-            lastBlock,
-            active: true,
-            dealId: nftID,
-          });
+            // Store XRPL-specific data
+            dealUpdate.nftID = parseInt(dealId) || 0; // Use dealId as nftID for XRPL
+            dealUpdate.mintTxHash = txHash;
+            dealUpdate.vaultAddress = vaultWallet.address;
+            dealUpdate.xrplVaultAddress = vaultWallet.address;
+            dealUpdate.xrplVaultSeed = vaultWallet.seed; // TODO: Encrypt this in production
+            dealUpdate.xrplBorrowerAddress = borrowerWallet.address;
+            dealUpdate.xrplBorrowerSeed = borrowerWallet.seed; // TODO: Encrypt this in production
+            
+            logger.debug(
+              `XRPL deal created: NFT hash=${txHash}, Vault=${vaultWallet.address}, Borrower=${borrowerWallet.address}`,
+            );
+          } else {
+            // EVM flow: Original blockchain flow
+            const lastBlock = await this.blockchain.getLastBlock();
 
-          dealUpdate.nftID = nftID;
-          dealUpdate.mintTxHash = txHash;
-          dealUpdate.vaultAddress = vault;
+            const txHash = await this.blockchain.mintNFT(
+              deal.milestones.map((m) => m.fundsDistribution),
+              deal.investmentAmount,
+              buyer.walletAddress,
+            );
+            const nftID = await this.blockchain.getNftID(txHash);
+            console.log('nftID', nftID);
+            // wait for 5 seconds to get the vault address
+            await new Promise((resolve) => setTimeout(resolve, 5000));
+            const vault = await this.blockchain.vault(nftID);
+
+            await SyncDealsLogsJob.create({
+              type: DealsLogsJobType.Vault,
+              contract: vault,
+              lastBlock,
+              active: true,
+              dealId: nftID,
+            });
+
+            dealUpdate.nftID = nftID;
+            dealUpdate.mintTxHash = txHash;
+            dealUpdate.vaultAddress = vault;
+          }
         }
       }
 
@@ -821,10 +870,37 @@ export class DealsService {
       throw new ForbiddenError('Invalid signature');
     }
 
-    await this.blockchain.changeMilestoneStatus(
-      deal.nftID as number,
-      currentMilestone,
-    );
+    if (config.useXrpl) {
+      // XRPL flow: Proceed milestone payout on XRPL
+      logger.debug('Using XRPL for milestone payout...');
+      
+      if (!deal.xrplVaultAddress || !deal.xrplVaultSeed) {
+        throw new BadRequestError('XRPL vault not configured for this deal');
+      }
+      
+      if (!deal.xrplBorrowerAddress) {
+        throw new BadRequestError('XRPL borrower not configured for this deal');
+      }
+      
+      // Reconstruct vault wallet from stored seed
+      const { Wallet } = await import('xrpl');
+      const vaultWallet = Wallet.fromSeed(deal.xrplVaultSeed);
+      
+      const milestones = deal.milestones.map((m) => m.fundsDistribution);
+      await this.xrpl.proceedMilestoneWithWallet(
+        vaultWallet,
+        deal.xrplBorrowerAddress,
+        currentMilestone - 1,
+        milestones,
+      );
+      logger.debug(`XRPL milestone ${currentMilestone - 1} paid out`);
+    } else {
+      // EVM flow: Original blockchain flow
+      await this.blockchain.changeMilestoneStatus(
+        deal.nftID as number,
+        currentMilestone,
+      );
+    }
 
     await this.notifications.sendMilestoneApprovedNotification(
       this.selectParticipantsEmailsBasedOnUser(user, deal),
@@ -910,10 +986,37 @@ export class DealsService {
       throw new BadRequestError('Milestone review was not submitted');
     }
 
-    await this.blockchain.changeMilestoneStatus(
-      deal.nftID as number,
-      milestoneIndex + 1,
-    );
+    if (config.useXrpl) {
+      // XRPL flow: Proceed milestone payout on XRPL
+      logger.debug('Using XRPL for milestone payout...');
+      
+      if (!deal.xrplVaultAddress || !deal.xrplVaultSeed) {
+        throw new BadRequestError('XRPL vault not configured for this deal');
+      }
+      
+      if (!deal.xrplBorrowerAddress) {
+        throw new BadRequestError('XRPL borrower not configured for this deal');
+      }
+      
+      // Reconstruct vault wallet from stored seed
+      const { Wallet } = await import('xrpl');
+      const vaultWallet = Wallet.fromSeed(deal.xrplVaultSeed);
+      
+      const milestones = deal.milestones.map((m) => m.fundsDistribution);
+      await this.xrpl.proceedMilestoneWithWallet(
+        vaultWallet,
+        deal.xrplBorrowerAddress,
+        milestoneIndex,
+        milestones,
+      );
+      logger.debug(`XRPL milestone ${milestoneIndex} paid out`);
+    } else {
+      // EVM flow: Original blockchain flow
+      await this.blockchain.changeMilestoneStatus(
+        deal.nftID as number,
+        milestoneIndex + 1,
+      );
+    }
 
     if (deal.isPublished) {
       await financeAppClient.updateMilestone(

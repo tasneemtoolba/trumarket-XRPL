@@ -87,6 +87,12 @@ export class Deal {
   nftID: number;
   mintTxHash: string;
   vaultAddress: string;
+  
+  // XRPL-specific properties (when USE_XRPL=true)
+  xrplVaultAddress?: string;
+  xrplVaultSeed?: string; // Encrypted in production
+  xrplBorrowerAddress?: string;
+  xrplBorrowerSeed?: string; // Encrypted in production
 
   // shipping properties
   contractId: number;

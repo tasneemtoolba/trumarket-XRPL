@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { Inject, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { SentryModule } from '@sentry/nestjs/setup';
@@ -16,6 +18,20 @@ import { connectDB } from './infra/database/connectDB';
 import { KYCModule } from './kyc/kyc.module';
 import { loggerOptions } from './logger';
 import { UsersModule } from './users/users.module';
+import { XrplModule } from './xrpl/xrpl.module';
+
+// Ensure log directory exists
+if (config.logsDestination && config.logsDestination !== '1' && config.logsDestination !== '2') {
+  const logDir = path.dirname(config.logsDestination);
+  if (logDir && !fs.existsSync(logDir)) {
+    try {
+      fs.mkdirSync(logDir, { recursive: true });
+    } catch (error) {
+      // If we can't create the directory, log to console instead
+      console.warn(`Failed to create log directory ${logDir}:`, error);
+    }
+  }
+}
 
 const modules = [
   SentryModule.forRoot(),
@@ -30,6 +46,7 @@ const modules = [
   UsersModule,
   DealsModule,
   KYCModule,
+  XrplModule,
 ];
 
 if (!process.env.E2E_TEST) {
@@ -38,31 +55,31 @@ if (!process.env.E2E_TEST) {
       pinoHttp:
         config.env === 'development' || config.prettyLogs
           ? {
-              serializers: {
-                req: ({ id, method, url, params, query }) => {
-                  return {
-                    id,
-                    method,
-                    url,
-                    params,
-                    query,
-                  };
-                },
-                res: ({ statusCode }) => {
-                  return { statusCode };
-                },
+            serializers: {
+              req: ({ id, method, url, params, query }) => {
+                return {
+                  id,
+                  method,
+                  url,
+                  params,
+                  query,
+                };
               },
-              transport: { target: 'pino-pretty' },
-              stream: pino.destination({
-                dest: config.logsDestination,
-                colorize: true,
-                sync: false,
-              }),
-              redact: {
-                paths: ['req.headers.authorization', 'req.headers.cookie'],
-                censor: '**REDACTED**',
+              res: ({ statusCode }) => {
+                return { statusCode };
               },
-            }
+            },
+            transport: { target: 'pino-pretty' },
+            stream: pino.destination({
+              dest: config.logsDestination,
+              colorize: true,
+              sync: false,
+            }),
+            redact: {
+              paths: ['req.headers.authorization', 'req.headers.cookie'],
+              censor: '**REDACTED**',
+            },
+          }
           : loggerOptions,
       forRoutes: ['*'],
     }),
@@ -81,7 +98,7 @@ if (!process.env.E2E_TEST) {
   ],
 })
 export class AppModule {
-  constructor(@Inject(providers.DatabaseConnection) private dbClient) {}
+  constructor(@Inject(providers.DatabaseConnection) private dbClient) { }
 
   async onModuleDestroy() {
     await this.dbClient.close();

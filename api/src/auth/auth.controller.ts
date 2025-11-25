@@ -5,8 +5,11 @@ import { DealsService } from '@/deals/deals.service';
 import { AuthenticatedRestricted } from '@/decorators/authenticatedRestricted';
 import { logger } from '@/logger';
 import { NotificationsService } from '@/notifications/notifications.service';
-import { User } from '@/users/users.entities';
+import { User, AccountType } from '@/users/users.entities';
 import { UsersService } from '@/users/users.service';
+import { XrplModule } from '@/xrpl/xrpl.module';
+import { XrplService } from '@/xrpl/xrpl.service';
+import { config } from '@/config';
 
 import { InternalServerError } from '../errors';
 import { AuthService } from './auth.service';
@@ -25,6 +28,7 @@ export class AuthController {
     private userService: UsersService,
     private dealsService: DealsService,
     private notificationsService: NotificationsService,
+    private xrplService: XrplService,
   ) { }
 
   @Get('')
@@ -123,6 +127,28 @@ export class AuthController {
         walletType,
         accountType,
       });
+
+      // Create XRPL wallet for investors if XRPL mode is enabled
+      if (config.useXrpl && accountType === AccountType.Investor) {
+        try {
+          logger.debug(`Creating XRPL wallet for investor ${email}`);
+          const xrplWallet = this.xrplService.generateInvestorWallet();
+
+          // Setup trustlines
+          await this.xrplService.setInvestorTrustlines(xrplWallet);
+
+          // Store wallet in user
+          await this.userService.updateById(user.id, {
+            xrplWalletAddress: xrplWallet.address,
+            xrplWalletSeed: xrplWallet.seed, // TODO: Encrypt this in production
+          });
+
+          logger.debug(`XRPL wallet created for investor: ${xrplWallet.address}`);
+        } catch (error) {
+          logger.error(error, 'Failed to create XRPL wallet for investor');
+          // Don't fail signup if XRPL wallet creation fails
+        }
+      }
 
       await this.dealsService.assignUserToDeals(user);
 

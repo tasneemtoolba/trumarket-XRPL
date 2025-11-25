@@ -28,4 +28,10 @@ export const config = {
   mailTo: process.env.MAIL_TO,
   vapidPublicKey: process.env.VAPID_PUBLIC_KEY,
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY,
+  xrplServerUrl:
+    process.env.XRPL_SERVER_URL || 'wss://s.altnet.rippletest.net:51233',
+  xrplAdminSeed: process.env.XRPL_ADMIN_SEED || '',
+  // Note: Vault and borrower seeds are no longer required in config
+  // They are created per deal automatically
+  useXrpl: process.env.USE_XRPL === 'true',
 };

@@ -12,6 +12,7 @@ export enum AccountType {
 
 export enum WalletType {
   EVM = 'evm',
+  XRPL = 'xrpl',
 }
 
 export enum RoleType {
@@ -46,6 +47,10 @@ export class User {
   kycVerified: boolean;
   desktopNotifications?: NotificationsSettings;
   emailNotifications?: NotificationsSettings;
+
+  // XRPL wallet (for investors when USE_XRPL=true)
+  xrplWalletAddress?: string;
+  xrplWalletSeed?: string; // Encrypted in production
 
   company?: Company;
 }

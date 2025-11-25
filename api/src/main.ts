@@ -12,12 +12,18 @@ import { config } from './config';
 import { ErrorsFilter } from './errors.filter';
 import { syncDealsLogs } from './jobs/syncDealsLogs';
 import { logger } from './logger';
+import { XrplDepositDetectorService } from './xrpl/xrpl-deposit-detector.service';
 
-webpush.setVapidDetails(
-  'mailto:' + config.mailTo,
-  config.vapidPublicKey,
-  config.vapidPrivateKey,
-);
+// Only set VAPID details if keys are provided
+if (config.vapidPublicKey && config.vapidPrivateKey && config.mailTo) {
+  webpush.setVapidDetails(
+    'mailto:' + config.mailTo,
+    config.vapidPublicKey,
+    config.vapidPrivateKey,
+  );
+} else {
+  logger.warn('VAPID keys not configured - push notifications will not work');
+}
 
 async function bootstrap() {
   logger.info('Starting server...');
@@ -74,6 +80,15 @@ async function bootstrap() {
   );
 
   schedule.scheduleJob('* * * * *', syncDealsLogs);
+
+  // Schedule XRPL deposit detection (runs every minute)
+  if (config.useXrpl) {
+    const depositDetector = app.get(XrplDepositDetectorService);
+    schedule.scheduleJob('* * * * *', async () => {
+      await depositDetector.detectAndProcessDeposits();
+    });
+    logger.info('XRPL deposit detection job scheduled');
+  }
 
   await app.listen(process.env.PORT || 4000);
 }
